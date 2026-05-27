@@ -1,0 +1,12 @@
+.env
+webhooks.json
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+ngrok.exe
+ngrok
