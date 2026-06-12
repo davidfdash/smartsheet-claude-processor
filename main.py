@@ -123,6 +123,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             process_row_event,
             sheet_id=scope_object_id,
             row_id=row_id,
+            object_type=object_type,
         )
 
     # Return 200 immediately — Claude runs in the background

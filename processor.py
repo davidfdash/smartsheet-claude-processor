@@ -312,12 +312,14 @@ def find_unprocessed_rows(sheet_id: str, since_minutes: int = 0) -> list[dict]:
     return result
 
 
-def process_row_event(sheet_id: str, row_id: str) -> None:
+def process_row_event(sheet_id: str, row_id: str, object_type: str = "") -> None:
     """
     Called as a FastAPI background task for each triggered row event.
     All exceptions are caught and logged — we never want a background
     task crash to bubble up to the webhook response.
     """
+    import time as _time
+
     key = f"{sheet_id}:{row_id}"
     if key in _in_flight:
         log.info("Skipping duplicate in-flight event  sheet=%s  row=%s", sheet_id, row_id)
@@ -325,6 +327,13 @@ def process_row_event(sheet_id: str, row_id: str) -> None:
     _in_flight.add(key)
 
     try:
+        # Comments take a few seconds to appear in the discussions API after the
+        # webhook fires. Without this delay, fetch_row returns stale discussions
+        # that still show Claude as the last commenter → incorrect skip.
+        if object_type == "comment":
+            log.info("Comment event — waiting 5s for Smartsheet discussion propagation")
+            _time.sleep(5)
+
         log.info("Processing  sheet=%s  row=%s", sheet_id, row_id)
 
         try:
