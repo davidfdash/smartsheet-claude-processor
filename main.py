@@ -16,7 +16,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from config import settings
-from processor import find_unprocessed_rows, process_row_event
+from processor import find_unprocessed_rows, process_discussion_event, process_row_event
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,37 +94,51 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         log.info("Ignoring event for untracked sheet %s", scope_object_id)
         return Response(status_code=200)
 
-    # Deduplicate — one task per unique rowId per callback
+    # Deduplicate — one task per unique row/discussion per callback
     seen_rows: set[str] = set()
+    seen_discussions: set[str] = set()
     for event in events:
         action      = event.get("eventType", "")
         object_type = event.get("objectType", "")
+        event_id    = str(event.get("id", ""))
 
         if action not in ("created", "updated"):
             continue
-        if object_type not in ("row", "cell", "comment"):
-            continue
 
-        row_id = str(
-            event.get("rowId")
-            or event.get("parentId")
-            or event.get("id")
-            or ""
-        )
-        if not row_id or row_id in seen_rows:
-            continue
-        seen_rows.add(row_id)
+        if object_type == "discussion":
+            # Comment added to a row — event.id is the discussion ID.
+            # We must fetch the discussion to resolve the row ID; done inside
+            # process_discussion_event so the webhook response stays instant.
+            if not event_id or event_id in seen_discussions:
+                continue
+            seen_discussions.add(event_id)
+            log.info(
+                "Queuing discussion resolver  sheet=%s  discussion=%s",
+                scope_object_id, event_id,
+            )
+            background_tasks.add_task(
+                process_discussion_event,
+                sheet_id=scope_object_id,
+                discussion_id=event_id,
+            )
 
-        log.info(
-            "Queuing processor  sheet=%s  row=%s  eventType=%s",
-            scope_object_id, row_id, action,
-        )
-        background_tasks.add_task(
-            process_row_event,
-            sheet_id=scope_object_id,
-            row_id=row_id,
-            object_type=object_type,
-        )
+        elif object_type in ("row", "cell"):
+            # Row created/updated — event has rowId (cell) or id (row)
+            row_id = str(event.get("rowId") or event.get("id") or "")
+            if not row_id or row_id in seen_rows:
+                continue
+            seen_rows.add(row_id)
+            log.info(
+                "Queuing processor  sheet=%s  row=%s  objectType=%s",
+                scope_object_id, row_id, object_type,
+            )
+            background_tasks.add_task(
+                process_row_event,
+                sheet_id=scope_object_id,
+                row_id=row_id,
+                object_type=object_type,
+            )
+        # comment and sheet objectTypes are ignored — discussion events cover them
 
     # Return 200 immediately — Claude runs in the background
     return Response(status_code=200)

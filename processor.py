@@ -60,6 +60,20 @@ def _ss_headers() -> dict:
     }
 
 
+def fetch_discussion_row_id(sheet_id: str, discussion_id: str) -> str | None:
+    """Return the row ID for a row-level discussion, or None if sheet-level."""
+    url = f"{SMARTSHEET_BASE}/sheets/{sheet_id}/discussions/{discussion_id}"
+    with httpx.Client(timeout=30) as client:
+        r = client.get(url, headers=_ss_headers())
+    if not r.is_success:
+        log.warning("Could not fetch discussion %s on sheet %s: HTTP %s", discussion_id, sheet_id, r.status_code)
+        return None
+    data = r.json()
+    if data.get("parentType") == "ROW":
+        return str(data.get("parentId", ""))
+    return None  # sheet-level discussion
+
+
 def fetch_row(sheet_id: str, row_id: str) -> dict:
     import time
     url = f"{SMARTSHEET_BASE}/sheets/{sheet_id}/rows/{row_id}?include=discussions"
@@ -310,6 +324,19 @@ def find_unprocessed_rows(sheet_id: str, since_minutes: int = 0) -> list[dict]:
         if not skip:
             result.append(row)
     return result
+
+
+def process_discussion_event(sheet_id: str, discussion_id: str) -> None:
+    """Resolve a discussion webhook event to its row ID, then process that row."""
+    import time as _time
+    # Discussions take a few seconds to propagate after the webhook fires
+    _time.sleep(5)
+    row_id = fetch_discussion_row_id(sheet_id, discussion_id)
+    if not row_id:
+        log.info("Ignoring discussion %s on sheet %s (sheet-level or not found)", discussion_id, sheet_id)
+        return
+    log.info("Discussion %s resolved to row %s on sheet %s", discussion_id, row_id, sheet_id)
+    process_row_event(sheet_id, row_id, object_type="comment")
 
 
 def process_row_event(sheet_id: str, row_id: str, object_type: str = "") -> None:
