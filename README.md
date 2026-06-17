@@ -143,24 +143,6 @@ ngrok http 8000
 
 If you have a static ngrok domain, use it consistently so you don't need to re-register webhooks after each restart.
 
-**Production — Railway (recommended):**
-1. Push this repo to GitHub
-2. New project on [railway.app](https://railway.app) → Deploy from GitHub repo
-3. Add environment variables in the Railway dashboard
-4. Railway provides a public HTTPS URL automatically
-
-**Production — Render:**
-1. New Web Service on [render.com](https://render.com) → connect your GitHub repo
-2. Set build command: `pip install -r requirements.txt`
-3. Set start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4. Add environment variables in the Render dashboard
-
-**Production — Docker on any VPS:**
-```bash
-docker build -t smartsheet-claude-processor .
-docker run -d -p 8000:8000 --env-file .env smartsheet-claude-processor
-```
-
 ### 7. Register Smartsheet webhooks
 
 Once your app is publicly reachable, run this **once**:
