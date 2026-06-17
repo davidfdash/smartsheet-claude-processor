@@ -1,6 +1,6 @@
 # Smartsheet Claude AI Processor
 
-Automatically posts AI-researched next steps as comments on Smartsheet rows whenever a card is created or updated. Powered by Claude with Smartsheet MCP and web search.
+Automatically posts AI-researched next steps as comments on Smartsheet rows whenever a card is created, updated, or commented on. Powered by Claude with Smartsheet MCP and web search.
 
 Each user self-hosts their own instance. No shared infrastructure — your Smartsheet token and Anthropic key stay on your own machine or server.
 
@@ -18,15 +18,31 @@ Smartsheet row created / updated / commented on
                │
                └─ Background task
                        │
-                  Anthropic API
-                  Claude + Smartsheet MCP + web_search
+                       ├─ Row / cell event  → fetch row by row ID
                        │
-                  Claude re-fetches live discussions,
-                  searches for Qlik best practices,
-                  posts [Claude Research Note] comment
+                       └─ Discussion event  → fetch discussion to resolve row ID
+                               │
+                          Anthropic API
+                          Claude + Smartsheet MCP + web_search
+                               │
+                          Claude re-fetches live discussions,
+                          searches for Qlik best practices,
+                          posts [Claude Research Note] comment
 ```
 
 A polling loop (default every 10 min) also scans sheets for rows with recent activity that the webhook may have missed.
+
+### Smartsheet webhook event types
+
+When a comment is added to a row, Smartsheet fires `objectType:discussion` events (not `objectType:comment`). The discussion event only contains the discussion ID — not the row ID. The processor resolves this by calling `GET /sheets/{sheetId}/discussions/{discussionId}` to get the `parentId` (the row ID), then processes that row normally with a 5-second propagation delay.
+
+| Smartsheet objectType | Handled | How |
+|---|---|---|
+| `row` | ✅ | Row ID comes directly from `event.id` |
+| `cell` | ✅ | Row ID comes from `event.rowId` |
+| `discussion` | ✅ | Fetches discussion to resolve row ID |
+| `comment` | ignored | Discussion events cover these |
+| `sheet` | ignored | No row to process |
 
 ---
 
@@ -44,7 +60,7 @@ A polling loop (default every 10 min) also scans sheets for rows with recent act
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/smartsheet-claude-processor.git
+git clone https://github.com/davidfdash/smartsheet-claude-processor.git
 cd smartsheet-claude-processor
 ```
 
@@ -80,6 +96,8 @@ Edit `.env` and fill in all required values:
 
 **Finding sheet IDs:** Open any Smartsheet sheet, go to File → Properties, or read the ID from the URL.
 
+> **Windows `.env` note:** Use only `KEY=VALUE` format — no spaces around `=`, no quotes unless the value contains spaces. Lines in any other format are silently ignored by python-dotenv.
+
 ### 4. Map sheet IDs to client names
 
 Open `processor.py` and update `SHEET_CLIENT_MAP` with your sheet IDs:
@@ -113,11 +131,17 @@ Smartsheet must be able to POST to your app over HTTPS.
 
 **Local dev — ngrok:**
 ```bash
-# Download from https://ngrok.com/download, then:
+# First-time setup (one-time):
 ngrok config add-authtoken YOUR_NGROK_TOKEN
+
+# Start tunnel (use --domain for a persistent URL on paid/free static plans):
+ngrok http --domain=YOUR-SUBDOMAIN.ngrok-free.app 8000
+
+# Or without a static domain (URL changes each restart):
 ngrok http 8000
-# Copy the https://xxxx.ngrok-free.app URL
 ```
+
+If you have a static ngrok domain, use it consistently so you don't need to re-register webhooks after each restart.
 
 **Production — Railway (recommended):**
 1. Push this repo to GitHub
@@ -158,14 +182,22 @@ Webhook details are saved to `webhooks.json` for reference.
 
 Create a new row (with at least a task name filled in) in any watched sheet. Within 60–120 seconds you should see a `[Claude Research Note]` comment on that row.
 
-Watch the app logs:
+To test comment follow-up: add any comment to an existing row that already has a Claude note. The processor will detect the new human activity and post an updated note.
+
+Watch the app logs — row/cell events:
 ```
-INFO  Queuing processor  sheet=5267249496543108  row=1234567890  eventType=created
+INFO  Queuing processor  sheet=5267249496543108  row=1234567890  objectType=cell
 INFO  Processing  sheet=5267249496543108  row=1234567890
-INFO  HTTP Request: GET https://api.smartsheet.com/... 200 OK
-INFO  HTTP Request: POST https://api.anthropic.com/... 200 OK
 INFO  Claude finished  tools=['web_search', 'smartsheet_create_discussion_on_row']
 INFO  Done  sheet=5267249496543108  row=1234567890  result=Posted [Claude Research Note]...
+```
+
+Comment/discussion events:
+```
+INFO  Queuing discussion resolver  sheet=5267249496543108  discussion=9876543210
+INFO  Discussion 9876543210 resolved to row 1234567890 on sheet 5267249496543108
+INFO  Comment event — waiting 5s for Smartsheet discussion propagation
+INFO  Processing  sheet=5267249496543108  row=1234567890
 ```
 
 ---
@@ -230,9 +262,18 @@ GET /health
 - Confirm `ANTHROPIC_API_KEY` is valid and has credits
 - Make sure the row has data in the Task Name column — blank rows are auto-deleted by Smartsheet
 
+**Comments I add don't trigger a follow-up Claude note**
+- Check the logs for `Queuing discussion resolver` lines when you add a comment
+- If absent, the webhook isn't reaching the app — confirm ngrok is running and the tunnel URL matches the registered webhook URL
+- If present but no Claude note appears, check for `SKIPPED` log lines (Claude may already be the last commenter)
+
 **`Row not available after retries` in logs**
 - This is usually a Smartsheet API propagation delay; the polling loop will pick it up within `POLL_INTERVAL_MINS` minutes
 - If it keeps happening, increase retries in `fetch_row()` in `processor.py`
+
+**`Discussion ... resolved to row` but no comment posted**
+- Check for `SKIPPED` immediately after — the skip rules apply after the discussion is resolved
+- Check for `Claude call failed` — may be an Anthropic API error (check key/credits)
 
 **Claude posts but the comment content looks off**
 - Check `SHEET_CLIENT_MAP` in `processor.py` — the sheet ID may be missing
@@ -247,7 +288,7 @@ GET /health
 ## Architecture notes
 
 - `main.py` — FastAPI app: webhook receiver, challenge handler, polling loop
-- `processor.py` — core logic: row fetch with retry, skip rules, prompt builder, Claude API call
+- `processor.py` — core logic: row fetch with retry, discussion → row ID resolution, skip rules, prompt builder, Claude API call
 - `config.py` — pydantic-settings config loaded from `.env`
 - `register.py` — one-time CLI to register and enable Smartsheet webhooks
 - `backfill.py` — one-time CLI to process existing rows without Claude comments
